@@ -1,402 +1,343 @@
+# app.py
 import streamlit as st
+from datetime import date, datetime
+import hashlib, secrets as pysecrets
 import pandas as pd
-import time
-from datetime import datetime
+from typing import Optional
 
-# Import core blockchain and wallet logic
+import database as db
 from blockchain import Blockchain
-from wallet import generate_key_pair
-from database import load_voters, save_voters, update_voter_status
-from email_utils import send_email # Now uses yagmail/SMTP
+from email_utils import send_verification_email
 
-# --- HOST KEYS ---
-# ⚠️ CRITICAL STEP 1: Paste the unique keys you generated here!
-# These keys are required for the Host Authority to sign all blocks (Proof-of-Authority)
-HOST_PUBLIC_KEY = "'59f7315aac41eee895e32a095a11ece8f9f270c2a24b61d48870727e56f0cdac1b1653812f3f246c1d513a2757fc9aa547b1be6c1e0d8ac779560c2a7554c3b3"  # PASTE THE SECOND STRING HERE
-HOST_PRIVATE_KEY = "30132997b575254fe80a7ff388324e257b0f787e10279f68c083a0f769c3625b" # PASTE THE FIRST STRING HERE
+# ---------------- config ----------------
+THEME_BLUE = "#1e63d6"
+GREY_BOX = "#f1f3f6"
+GREEN_BOX = "#c6f6d5"
 
-# --- CONFIGURATION (CRITICAL for Email) ---
-DB_PATH = 'voters.db'
-BLOCKCHAIN_PATH = 'blockchain_data.json'
+st.set_page_config(page_title="Secure Blockchain Voting", layout="wide")
 
-# ⚠️ CRITICAL STEP 2: Configure your email credentials here for the registration feature.
-# Use the email address that will send the email and the corresponding App Password or SMTP API Key.
-# The email feature will fail if these are left as placeholders.
-SMTP_SENDER_EMAIL = "host@example.com" 
-SMTP_API_KEY = "your_smtp_api_key_or_app_password" 
-
-
-# --- INITIALIZATION ---
-# Initialize the Blockchain and Database
-try:
-    blockchain = Blockchain(HOST_PUBLIC_KEY, HOST_PRIVATE_KEY, BLOCKCHAIN_PATH)
-except Exception as e:
-    st.error(f"Error initializing Blockchain: {e}")
-    st.stop()
-
-# Initialize voters DataFrame
-voters_df = load_voters(DB_PATH)
-
-# --- STREAMLIT PAGE SETUP ---
-st.set_page_config(layout="wide", page_title="Secure Blockchain Voting System - Host Portal")
-
-# Custom CSS for styling
-st.markdown("""
+# ---------------- css ----------------
+st.markdown(f"""
 <style>
-    .stApp {
-        background-color: #f7f9fc;
-    }
-    .header {
-        font-size: 32px;
-        font-weight: bold;
-        color: #1e40af;
-        border-bottom: 2px solid #1e40af;
-        padding-bottom: 10px;
-        margin-bottom: 20px;
-    }
-    .stButton>button {
-        background-color: #3b82f6;
-        color: white;
-        border-radius: 8px;
-        padding: 10px 20px;
-        font-size: 16px;
-        transition: all 0.2s;
-        box-shadow: 0 4px #1e40af;
-    }
-    .stButton>button:hover {
-        background-color: #2563eb;
-    }
-    .key-box {
-        background-color: #e0f2fe;
-        padding: 15px;
-        border-radius: 10px;
-        border: 1px solid #93c5fd;
-        margin-bottom: 15px;
-        word-wrap: break-word;
-    }
-    .success-box {
-        background-color: #d1fae5;
-        color: #065f46;
-        padding: 10px;
-        border-radius: 5px;
-    }
-    .error-box {
-        background-color: #fee2e2;
-        color: #991b1b;
-        padding: 10px;
-        border-radius: 5px;
-    }
-    /* Hide the default Streamlit footer */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
+/* left sidebar background (works in many Streamlit releases) */
+[data-testid="stSidebar"] > div:first-child {{
+  background: {THEME_BLUE};
+  padding-top: 12px;
+  color: white;
+}}
+.card {{
+  background: {GREY_BOX};
+  padding: 12px;
+  border-radius: 12px;
+  margin-bottom: 8px;
+}}
+.candidate-box {{
+  background: {GREY_BOX};
+  padding: 12px;
+  border-radius: 10px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  border: 2px solid rgba(0,0,0,0);
+}}
+.candidate-box.selected {{
+  background: {GREEN_BOX};
+  border-color: rgba(0,0,0,0.08);
+}}
+.scroll-box {{
+  max-height: 420px;
+  overflow-y: auto;
+}}
+.footer-button {{
+  position: fixed;
+  bottom: 16px;
+  left: 16px;
+  right: 16px;
+  display: flex;
+  justify-content: center;
+}}
+.small-muted {{ color: #6b7280; font-size: 13px; }}
 </style>
 """, unsafe_allow_html=True)
 
+# ---------------- init ----------------
+db.init_db()
+if 'blockchain' not in st.session_state:
+    st.session_state.blockchain = Blockchain()
 
-def display_host_portal():
-    st.markdown('<div class="header">Host Authority Portal: Election Setup & Monitoring</div>', unsafe_allow_html=True)
+# MODE: host (default) or voter via ?mode=voter
+query = st.experimental_get_query_params()
+mode = query.get("mode", ["host"])[0]
 
-    # Display Host Public Key for transparency
-    st.subheader("Host Public Key (Authority ID)")
-    st.markdown(f'<div class="key-box"><strong>{HOST_PUBLIC_KEY}</strong></div>', unsafe_allow_html=True)
-    st.info("This key signs all validated blocks. It is visible to all voters.")
-    
-    # Display Email Configuration Warning
-    if SMTP_SENDER_EMAIL == "host@example.com" or SMTP_API_KEY == "your_smtp_api_key_or_app_password":
-        st.warning("⚠️ EMAIL FEATURE WARNING: Please update the `SMTP_SENDER_EMAIL` and `SMTP_API_KEY` in `app.py` before registering real voters, or email delivery will fail.")
+# sidebar tabs
+if mode == "host":
+    tab = st.sidebar.radio("Host", ["Home", "Voters", "Candidates", "Blockchain"])
+else:
+    tab = st.sidebar.radio("Voter", ["Home", "Register", "Vote", "Blockchain"])
 
+# election state (DB)
+state = db.get_state()
 
-    # --- Sidebar for Navigation ---
-    st.sidebar.title("Navigation")
-    portal_selection = st.sidebar.radio(
-        "Go to",
-        ["Election Configuration", "Voter Registration", "Blockchain Audit"]
-    )
+# ---------------- helpers ----------------
+def make_vote_fingerprint(email: str, candidate: str, secret_nonce: str) -> str:
+    """Create irreversible fingerprint stored on blockchain."""
+    # combine normalized email (or other voter secret), candidate, nonce, timestamp
+    payload = f"{email.strip().lower()}|{candidate}|{secret_nonce}|{datetime.utcnow().isoformat()}"
+    return hashlib.sha256(payload.encode()).hexdigest()
 
-    if portal_selection == "Election Configuration":
-        election_config_page()
-    elif portal_selection == "Voter Registration":
-        voter_registration_page()
-    elif portal_selection == "Blockchain Audit":
-        blockchain_audit_page()
+def voter_hash_for_db(email: str) -> str:
+    """A stable hashed id stored in DB votes table to avoid storing plaintext."""
+    return hashlib.sha256((email.strip().lower() + "|voter").encode()).hexdigest()
 
-def election_config_page():
-    st.header("1. Election Configuration")
-    
-    # Initialize session state for candidates
-    st.session_state.setdefault('candidates', ["Candidate A", "Candidate B", "Candidate C"])
-    
-    st.markdown("Edit the list of candidates below. Each candidate must have a unique name.")
-    
-    # Allow user to edit candidates
-    candidates_input = st.text_area(
-        "Candidates (one per line)",
-        value="\n".join(st.session_state.candidates),
-        height=150
-    )
+def generate_token() -> str:
+    return pysecrets.token_urlsafe(24)
 
-    new_candidates = [c.strip() for c in candidates_input.split('\n') if c.strip()]
-    if new_candidates:
-        st.session_state.candidates = new_candidates
-        st.success("Candidate list updated.")
-    else:
-        st.error("Please enter at least one candidate.")
+# ---------------- HOST UI ----------------
+if mode == "host":
+    st.title("Secure\nBlockchain\nVoting System")
 
-    st.subheader("Current Candidates:")
-    for i, candidate in enumerate(st.session_state.candidates):
-        st.write(f"{i+1}. **{candidate}**")
-
-    st.markdown("---")
-
-    # --- Election Results ---
-    st.header("2. Real-Time Election Results")
-    
-    # Tally votes from the blockchain
-    vote_tally = {}
-    for candidate in st.session_state.candidates:
-        vote_tally[candidate] = 0
-
-    all_transactions = [block.transactions for block in blockchain.chain]
-    for block_txs in all_transactions:
-        for tx in block_txs:
-            if 'vote' in tx and tx['vote'] in vote_tally:
-                vote_tally[tx['vote']] += 1
-
-    # Convert tally to DataFrame for visualization
-    results_df = pd.DataFrame(
-        list(vote_tally.items()),
-        columns=['Candidate', 'Votes']
-    ).sort_values(by='Votes', ascending=False).reset_index(drop=True)
-
-    st.dataframe(results_df, use_container_width=True, hide_index=True)
-    
-    # Display Chart
-    st.bar_chart(results_df.set_index('Candidate'))
-    
-    # --- Manual Vote Validation/Block Mining ---
-    st.markdown("---")
-    st.subheader("Block Mining (Vote Validation)")
-    pending_votes = len(blockchain.current_transactions)
-    st.info(f"There are **{pending_votes}** pending votes in the current transaction pool.")
-    
-    if st.button("Mine New Block (Validate Pending Votes)"):
-        if pending_votes > 0:
-            new_block = blockchain.new_block()
-            st.markdown(f'<div class="success-box">✅ New Block #{new_block.index} Mined and added to the chain! {pending_votes} votes validated.</div>', unsafe_allow_html=True)
-            # Need to re-run the script to refresh the results
-            st.rerun() 
-        else:
-            st.warning("No pending votes to mine into a new block.")
-
-
-def voter_registration_page():
-    global voters_df
-    st.header("Voter Registration")
-
-    with st.form("voter_form"):
-        st.subheader("Register New Voter")
-        name = st.text_input("Full Name", max_chars=100).strip()
-        email = st.text_input("Email Address").strip().lower()
-
-        submitted = st.form_submit_button("Register Voter & Generate Wallet")
-
-        if submitted:
-            if not name or not email:
-                st.markdown('<div class="error-box">Please fill in both Name and Email.</div>', unsafe_allow_html=True)
-                st.stop()
-            
-            # 1. Check if voter already exists
-            if email in voters_df['email'].values:
-                st.markdown('<div class="error-box">Voter with this email is already registered.</div>', unsafe_allow_html=True)
-                st.stop()
-            
-            # 2. Generate Key Pair (Wallet)
-            private_key, public_key = generate_key_pair()
-            
-            # 3. Create a unique Voter ID (Public Key is the unique ID)
-            new_voter = {
-                'name': name,
-                'email': email,
-                'public_key': public_key,
-                'private_key': private_key,
-                'is_registered': True,
-                'has_voted': False,
-                'registration_date': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            }
-            
-            # 4. Add to DataFrame and Save Database
-            voters_df = pd.concat([voters_df, pd.DataFrame([new_voter])], ignore_index=True)
-            save_voters(voters_df, DB_PATH)
-            
-            # 5. Send Email with Credentials
-            email_success = send_email(
-                SMTP_SENDER_EMAIL,
-                SMTP_API_KEY,
-                email,
-                "Your Secure Voting Credentials",
-                f"Thank you for registering for the election, {name}. Use these keys in the Voter Portal to cast your ballot.",
-                private_key, 
-                public_key
-            )
-            
-            st.markdown('<div class="success-box">Voter Registered Successfully!</div>', unsafe_allow_html=True)
-            if email_success:
-                 st.success("Credentials emailed successfully (check spam)!")
+    if tab == "Home":
+        st.header("Host Controls")
+        st.write("Use the controls below to open registration, start/stop voting, and view results.")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if state['registration_open']:
+                st.success("Registration: OPEN")
             else:
-                 st.error("Credentials generated, but **EMAIL FAILED**. Check your SMTP configuration in `app.py`. Please securely copy the keys below.")
-            
-            st.subheader("Voter's Credentials (Securely share this with the voter)")
-            
-            # Display credentials for copying
-            st.code(f"PUBLIC KEY (Voter ID):\n{public_key}", language='text')
-            st.code(f"PRIVATE KEY (Secret Wallet):\n{private_key}", language='text')
-            
-            # Rerun to clear form and update voter list
-            time.sleep(1)
-            st.rerun()
+                st.info("Registration: CLOSED")
+        with col2:
+            if state['voting_open']:
+                st.success("Voting: OPEN")
+            else:
+                st.info("Voting: CLOSED")
+        with col3:
+            if state['ended']:
+                st.warning("Election ended")
+            else:
+                st.info("Election active")
 
-    st.markdown("---")
-    st.header("Registered Voters")
-    if not voters_df.empty:
-        # Display registered voters, hiding the private key for safety
-        display_df = voters_df.drop(columns=['private_key']).sort_values(by='registration_date', ascending=False)
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
-    else:
-        st.info("No voters registered yet.")
+        st.markdown("---")
 
+        if state['registration_open']:
+            if st.button("Close Registration"):
+                db.set_registration(False)
+                st.experimental_rerun()
+        else:
+            if st.button("Open Registration"):
+                db.set_registration(True)
+                st.experimental_rerun()
 
-def blockchain_audit_page():
-    st.header("Blockchain Audit")
+        if state['voting_open']:
+            if st.button("End Voting"):
+                db.end_voting()
+                st.experimental_rerun()
+        else:
+            if st.button("Start Voting"):
+                # require at least 2 candidates
+                if len(db.list_candidates()) < 2:
+                    st.warning("Need at least 2 candidates to start voting.")
+                else:
+                    db.start_voting()
+                    st.experimental_rerun()
 
-    # 1. Display Chain Integrity Status
-    st.subheader("Chain Integrity Check")
-    if blockchain.is_valid():
-        st.markdown('<div class="success-box">✅ Blockchain Integrity is VALID. All blocks are signed correctly by the Host Authority.</div>', unsafe_allow_html=True)
-    else:
-        st.markdown('<div class="error-box">🚨 Blockchain Integrity Check FAILED! The chain may have been tampered with.</div>', unsafe_allow_html=True)
+        st.markdown("---")
+        st.subheader("Results (quick view)")
+        results = db.tally_results()
+        if results:
+            df = pd.DataFrame(list(results.items()), columns=["Candidate","Votes"])
+            st.bar_chart(df.set_index("Candidate")["Votes"])
+            st.table(df)
+        else:
+            st.info("No votes yet (or results not available).")
 
-    st.markdown("---")
+    elif tab == "Voters":
+        st.header("Registered Voters")
+        st.markdown("<div class='scroll-box'>", unsafe_allow_html=True)
+        voters = db.list_voters()
+        for v in voters:
+            vid, name, dob, email, password, verified, has_voted, registered_at = v
+            cols = st.columns([10,1])
+            with cols[0]:
+                verified_text = "✅" if verified else "⏳"
+                voted_text = "✅" if has_voted else "—"
+                st.markdown(f"<div class='card'><b>{name.title()}</b><br><span class='small-muted'>DOB: {dob} • Email: {email}</span><br>Verified: {verified_text} • Voted: {voted_text}</div>", unsafe_allow_html=True)
+            with cols[1]:
+                if st.button("❌", key=f"remove_voter_{vid}"):
+                    db.remove_voter(vid)
+                    st.experimental_rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    # 2. Display the Chain Length
-    st.subheader(f"Total Blocks: {len(blockchain.chain)}")
-    st.write(f"The Genesis Block (Block #0) was created on: **{blockchain.chain[0].timestamp}**")
-    
-    st.markdown("---")
+    elif tab == "Candidates":
+        st.header("Candidates")
+        c_name = st.text_input("Candidate name", key="host_new_cand")
+        if st.button("Add Candidate"):
+            ok,msg = db.add_candidate(c_name)
+            if ok:
+                st.success(msg); st.experimental_rerun()
+            else:
+                st.warning(msg)
+        st.markdown("<div class='scroll-box'>", unsafe_allow_html=True)
+        for cid, cname in db.list_candidates():
+            cols = st.columns([10,1])
+            with cols[0]:
+                st.markdown(f"<div class='card'><b>{cname}</b></div>", unsafe_allow_html=True)
+            with cols[1]:
+                if st.button("❌", key=f"remcand_{cid}"):
+                    db.remove_candidate(cid)
+                    st.experimental_rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    # 3. Display all Blocks in Detail
-    st.subheader("Block Details")
-    
-    # Reverse the chain for display (newest first)
-    for i, block in enumerate(reversed(blockchain.chain)):
-        
-        # Calculate original index
-        original_index = len(blockchain.chain) - 1 - i
-        
-        with st.expander(f"Block #{original_index} (Time: {block.timestamp})", expanded=True if original_index == len(blockchain.chain) - 1 else False):
-            st.json({
-                "index": block.index,
-                "timestamp": block.timestamp,
-                "previous_hash": block.previous_hash,
-                "host_signature": block.host_signature,
-                "transactions": block.transactions,
-                "current_hash": block.hash
-            })
+    elif tab == "Blockchain":
+        st.header("Blockchain Explorer (hashed votes only)")
+        bc = st.session_state.blockchain
+        st.markdown("<div class='scroll-box'>", unsafe_allow_html=True)
+        for blk in bc.chain:
+            st.markdown(f"**Block #{blk.index}** — {blk.timestamp}")
+            st.write(f"Hash: `{blk.hash}`")
+            st.write(f"Prev: `{blk.previous_hash}`")
+            st.markdown("---")
+        st.markdown("</div>", unsafe_allow_html=True)
 
-# --- VOTER PORTAL STAND-IN ---
-# This section simulates the voter's experience for testing, but ideally should be in a separate file.
-def voter_portal_standin():
-    global voters_df
-    
-    st.markdown('<div class="header" style="color:#059669; border-bottom: 2px solid #059669;">Voter Portal (Simulation)</div>', unsafe_allow_html=True)
-    st.info("Use this section to test the voting process using the credentials generated in the Host Portal.")
-    
-    st.session_state.setdefault('candidates', ["Candidate A", "Candidate B", "Candidate C"])
+# ---------------- VOTER UI ----------------
+else:
+    # Voter mode
+    if tab == "Home":
+        st.title("Welcome")
+        st.write("This is the voter portal. If registration is open you can register. If voting is open you can vote.")
+        st.write("")
+        st.write(f"Registration open: **{state['registration_open']}**  — Voting open: **{state['voting_open']}**  — Election ended: **{state['ended']}**")
+        if st.button("Results"):
+            if not state['ended']:
+                st.info("Voting not ended yet.")
+            else:
+                results = db.tally_results()
+                if not results:
+                    st.info("No votes recorded.")
+                else:
+                    df = pd.DataFrame(list(results.items()), columns=["Candidate","Votes"])
+                    st.bar_chart(df.set_index("Candidate")["Votes"])
+                    st.table(df)
 
-    with st.form("vote_form"):
-        st.subheader("Cast Your Vote")
-        
-        voter_public_key = st.text_input("VOTER ID (Public Key)").strip()
-        voter_private_key = st.text_input("SECRET WALLET KEY (Private Key)", type="password").strip()
-        
-        vote_selection = st.selectbox("Select Candidate", st.session_state.candidates)
-        
-        submit_vote = st.form_submit_button("Cast Vote Securely")
-        
-        if submit_vote:
-            if not voter_public_key or not voter_private_key:
-                st.error("Please enter both your Public Key and Private Key.")
-                st.stop()
-            
-            # 1. Look up voter in database
-            voter_row = voters_df[voters_df['public_key'] == voter_public_key]
-            
-            if voter_row.empty:
-                st.error("Error: Invalid Voter ID (Public Key).")
-                st.stop()
-            
-            # 2. Basic verification (Private Key match)
-            if voter_row['private_key'].iloc[0] != voter_private_key:
-                st.error("Error: Private Key does not match Voter ID.")
-                st.stop()
-                
-            # 3. Check if already voted
-            if voter_row['has_voted'].iloc[0]:
-                st.warning("You have already cast your vote. Multiple votes are prevented.")
-                st.stop()
-                
-            # 4. Prepare data and sign transaction
-            data_to_sign = f"{voter_public_key}:{vote_selection}:{time.time()}"
-            
-            from wallet import sign_transaction, verify_signature # Import here to avoid circular dependency issues
-            signature = sign_transaction(voter_private_key, data_to_sign)
+    elif tab == "Register":
+        st.header("Register to vote")
+        if not state['registration_open']:
+            st.info("Registration is currently closed.")
+        else:
+            with st.form("register_form"):
+                name = st.text_input("Full name")
+                dob = st.date_input("Date of birth")
+                email = st.text_input("Email")
+                password = st.text_input("Password", type="password")
+                submitted = st.form_submit_button("Register and send verification email")
+                if submitted:
+                    # basic checks
+                    if not name.strip() or not email.strip() or not password:
+                        st.error("Please fill all fields.")
+                    else:
+                        # age check
+                        today = date.today()
+                        age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+                        if age < 18:
+                            st.error("You must be at least 18 to register.")
+                        else:
+                            ok,msg = db.add_voter(name, dob.strftime("%Y-%m-%d"), email, password)
+                            if not ok:
+                                st.warning(msg)
+                            else:
+                                # create verification token and send email (if configured)
+                                token = make_token = pysecrets.token_urlsafe(24)
+                                db.store_verification_token(email, token)
+                                verification_link = st.request_host_url() + "?" + "mode=voter&verify=" + token
+                                sent, send_msg = send_verification_email(email, verification_link)
+                                if sent:
+                                    st.success("Registered — verification email sent. Check your inbox.")
+                                else:
+                                    st.warning("Registered, but verification email could not be sent (check SMTP). The verification link is shown below.")
+                                    st.code(verification_link)
 
-            if not signature:
-                st.error("Failed to sign transaction. Check private key format.")
-                st.stop()
-                
-            # 5. Verify the signature (A final sanity check, simulating verification on the network)
-            if not verify_signature(voter_public_key, data_to_sign, signature):
-                st.error("Signature verification failed. Potential tampering detected.")
-                st.stop()
-                
-            # 6. Create the transaction and add to blockchain's pool
-            blockchain.new_transaction(
-                sender=voter_public_key,
-                recipient="ElectionAuthority",
-                vote=vote_selection
-            )
-            
-            # 7. Update database status
-            update_voter_status(voters_df, voter_public_key)
-            save_voters(voters_df, DB_PATH)
-            
-            st.markdown(f'<div class="success-box">✅ Vote successfully cast for **{vote_selection}**!</div>', unsafe_allow_html=True)
-            st.info("Your vote is now in the transaction pool and will be validated when the Host mines the next block.")
-            
-            st.write("--- Transaction Details ---")
-            st.json({
-                "Voter ID": voter_public_key,
-                "Candidate": vote_selection,
-                "Raw Data Signed": data_to_sign,
-                "Signature": signature
-            })
-            
-            # Rerun to clear form
-            time.sleep(1)
-            st.rerun()
+    elif tab == "Vote":
+        st.header("Vote")
+        if not state['voting_open']:
+            st.info("Voting not open.")
+        else:
+            candidates = db.list_candidates()
+            if not candidates:
+                st.info("No candidates available yet.")
+            else:
+                # candidate selection boxes (visual)
+                st.write("Click a candidate to select (only one).")
+                # store selection in session_state to persist across reruns
+                if "selected_candidate" not in st.session_state:
+                    st.session_state.selected_candidate = None
 
-# --- RUN APPLICATION ---
-if __name__ == "__main__":
-    if HOST_PUBLIC_KEY == "PASTE_YOUR_PUBLIC_KEY_HERE" or HOST_PRIVATE_KEY == "PASTE_YOUR_PRIVATE_KEY_HERE":
-        st.error("⚠️ CRITICAL ERROR: HOST KEYS NOT SET!")
-        st.warning("Please run the key generation command (`py -c \"from wallet import generate_key_pair; print(generate_key_pair())\"`), copy the Private Key and Public Key, and paste them into lines 16 & 17 of your `app.py` file, then save and relaunch.")
-        st.stop()
+                # render candidate boxes; clicking sets session_state.selected_candidate
+                for cid, cname in candidates:
+                    # create a unique key per candidate for the button
+                    key = f"cand_btn_{cid}"
+                    selected = (st.session_state.selected_candidate == cname)
+                    box_class = "candidate-box selected" if selected else "candidate-box"
+                    cols = st.columns([10,1])
+                    with cols[0]:
+                        st.markdown(f"<div class='{box_class}'>{cname}</div>", unsafe_allow_html=True)
+                    with cols[1]:
+                        if st.button("Select", key=key):
+                            st.session_state.selected_candidate = cname
+                            st.experimental_rerun()
 
-    # Layout: Host Portal on the left, Voter Portal on the right
-    col1, col2 = st.columns([1, 1])
+                st.markdown("---")
+                st.write("When ready, confirm your choice. You will be asked to enter your credentials (email + password) to finalize the vote.")
 
-    with col1:
-        display_host_portal()
+                if st.session_state.get("selected_candidate", None):
+                    if st.button("Confirm Choice"):
+                        # open a modal to request credentials
+                        with st.modal("Confirm Credentials"):
+                            st.write("Enter your registered email and password to confirm your vote.")
+                            v_email = st.text_input("Registered email", key="confirm_email")
+                            v_pass = st.text_input("Password", type="password", key="confirm_pass")
+                            if st.button("Submit Vote (final)"):
+                                voter = db.get_voter_by_email(v_email)
+                                if not voter:
+                                    st.error("No registered voter with that email.")
+                                else:
+                                    vid, full_name, dob, email, pwd, verified, has_voted, reg_at = voter
+                                    # case-insensitive name not used here; we check email+password
+                                    if not verified:
+                                        st.error("Email not verified. Please verify your email before voting.")
+                                    elif has_voted:
+                                        st.warning("You have already voted.")
+                                    elif pwd != v_pass:
+                                        st.error("Wrong password.")
+                                    else:
+                                        # create fingerprint and record
+                                        nonce = pysecrets.token_urlsafe(12)
+                                        fingerprint = make_vote_fingerprint(email, st.session_state.selected_candidate, nonce)
+                                        # add to blockchain (only fingerprint)
+                                        blk = st.session_state.blockchain.add_block(fingerprint)
+                                        # insert a DB vote record for tallying (stores hashed voter id, candidate)
+                                        db.insert_vote_record(voter_hash_for_db(email), st.session_state.selected_candidate)
+                                        # mark voter as voted
+                                        db.update_voter_voted(email)
+                                        st.success(f"Vote recorded on block #{blk.index}. Thank you!")
+                                        # clear selection
+                                        st.session_state.selected_candidate = None
+                                        st.experimental_rerun()
 
-    with col2:
-        voter_portal_standin()
+    elif tab == "Blockchain":
+        st.header("Blockchain Explorer (hashed votes only)")
+        st.markdown("<div class='scroll-box'>", unsafe_allow_html=True)
+        for blk in st.session_state.blockchain.chain:
+            st.markdown(f"**Block #{blk.index}** — {blk.timestamp}")
+            st.write(f"Hash: `{blk.hash}`")
+            st.write(f"Prev: `{blk.previous_hash}`")
+            st.markdown("---")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+# ---------------- verify token handler ----------------
+verify_token = st.experimental_get_query_params().get("verify", [None])[0]
+if verify_token:
+    email = db.get_email_by_token(verify_token)
+    if email:
+        db.mark_verified(email)
+        db.delete_token(verify_token)
+        st.success(f"Email {email} verified — you can now vote when voting opens.")
+        # clear query param by reloading without it
+        st.experimental_set_query_params(mode="voter")
