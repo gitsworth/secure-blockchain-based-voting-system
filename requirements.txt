@@ -1,4 +1,4 @@
 streamlit
 pandas
-ecdsa
+ecdsa==0.18.0
 yagmail
