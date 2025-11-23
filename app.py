@@ -3,8 +3,8 @@ import streamlit as st
 import sqlite3
 import hashlib
 from datetime import datetime, date
-from blockchain import Blockchain  # your blockchain.py
-from email_utils import send_email  # your email_utils.py
+from blockchain import Blockchain
+from email_utils import send_email
 
 # ------------------------
 # CONFIG AND STYLE
@@ -33,7 +33,6 @@ def get_conn():
 def init_db():
     conn = get_conn()
     c = conn.cursor()
-    # voters table
     c.execute("""
         CREATE TABLE IF NOT EXISTS voters (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,14 +42,12 @@ def init_db():
             has_voted INTEGER DEFAULT 0
         )
     """)
-    # candidates table
     c.execute("""
         CREATE TABLE IF NOT EXISTS candidates (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT UNIQUE
         )
     """)
-    # votes aggregate table
     c.execute("""
         CREATE TABLE IF NOT EXISTS votes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,7 +56,6 @@ def init_db():
             timestamp TEXT
         )
     """)
-    # election state table
     c.execute("""
         CREATE TABLE IF NOT EXISTS election_state (
             id INTEGER PRIMARY KEY CHECK(id=1),
@@ -73,7 +69,7 @@ def init_db():
     conn.close()
 
 init_db()
-blockchain = Blockchain()  # from blockchain.py
+blockchain = Blockchain()
 
 # ------------------------
 # UTILITY FUNCTIONS
@@ -223,60 +219,83 @@ if mode=="host":
     st.markdown("</div>", unsafe_allow_html=True)
 
 # ------------------------
-# VOTER PORTAL
+# VOTER PORTAL (Updated UI)
 # ------------------------
 else:
     st.markdown("<div class='card'>", unsafe_allow_html=True)
     st.header("Voter Portal")
+    
     state = get_state()
-    st.write(f"**Registration open:** {state['registration_open']} | **Voting open:** {state['voting_open']} | **Ended:** {state['ended']}")
+    st.write(f"**Registration open:** {state['registration_open']} | "
+             f"**Voting open:** {state['voting_open']} | "
+             f"**Ended:** {state['ended']}")
     st.markdown("---")
 
+    # Registration Form
     if state['registration_open']:
         st.subheader("Register to Vote")
-        name=st.text_input("Full Name", key="reg_name")
-        dob=st.date_input("Date of Birth", key="reg_dob")
-        email=st.text_input("Email", key="reg_email")
-        if st.button("Register"):
-            today=date.today()
-            age=today.year-dob.year-((today.month,today.day)<(dob.month,dob.day))
-            if age<18: st.error("You must be at least 18.")
-            else:
-                ok,msg=add_voter(name,dob.strftime("%Y-%m-%d"),email)
-                if ok: st.success("Registered successfully.")
-                else: st.error(msg)
+        today = date.today()
+        min_year = 1900
+        max_year = today.year - 18  # at least 18
 
-    elif state['voting_open']:
-        st.subheader("Voting")
-        email=st.text_input("Enter registered email", key="vote_email")
-        if st.button("Login to vote"):
-            voter=get_voter(email)
-            if not voter: st.error("Email not found.")
-            else:
-                vid, full_name, dob_str, em, has_voted=voter
-                if has_voted: st.warning("Already voted.")
+        with st.form("registration_form"):
+            name = st.text_input("Full Name (First Middle Last)", placeholder="John M. Doe")
+            email = st.text_input("Email", placeholder="you@example.com")
+            dob = st.date_input("Date of Birth", min_value=date(min_year,1,1), max_value=date(max_year,today.month,today.day))
+            submitted = st.form_submit_button("Register")
+
+            if submitted:
+                age = today.year - dob.year - ((today.month,today.day) < (dob.month,dob.day))
+                if age < 18:
+                    st.error("You must be at least 18 years old.")
+                elif name.strip() == "" or email.strip() == "":
+                    st.error("Name and Email cannot be empty.")
                 else:
-                    cands=list_candidates()
-                    if not cands: st.info("No candidates yet.")
+                    ok, msg = add_voter(name, dob.strftime("%Y-%m-%d"), email)
+                    if ok:
+                        st.success("✅ Registration successful!")
+                        send_email(email, "Registration Successful", f"Hello {name},\nYour registration for Secure Voting is complete!")
                     else:
-                        choice=st.radio("Select candidate",[c[1] for c in cands])
-                        if st.button("Submit Vote"):
-                            v_hash=voter_hash(email)
-                            vote_fingerprint=hash_value(email.strip().lower()+"|"+choice+"|"+str(datetime.utcnow()))
-                            blockchain.add_block(vote_fingerprint)
-                            mark_voted(email,v_hash,choice)
-                            st.success(f"Vote for {choice} recorded!")
+                        st.error(msg)
 
+    # Voting Section
+    elif state['voting_open']:
+        st.subheader("Cast Your Vote")
+        email = st.text_input("Enter your registered email", placeholder="you@example.com", key="vote_email")
+        if st.button("Login to vote"):
+            voter = get_voter(email)
+            if not voter:
+                st.error("Email not found. Please register first.")
+            else:
+                vid, full_name, dob_str, em, has_voted = voter
+                if has_voted:
+                    st.warning("You have already voted.")
+                else:
+                    cands = list_candidates()
+                    if not cands:
+                        st.info("No candidates available yet. Please wait for host to add them.")
+                    else:
+                        choice = st.radio("Select a candidate:", [c[1] for c in cands])
+                        if st.button("Submit Vote"):
+                            v_hash = voter_hash(email)
+                            vote_fingerprint = hash_value(email.strip().lower() + "|" + choice + "|" + str(datetime.utcnow()))
+                            blockchain.add_block(vote_fingerprint)
+                            mark_voted(email, v_hash, choice)
+                            st.success(f"✅ Your vote for **{choice}** has been recorded!")
+                            send_email(email, "Vote Recorded", f"Hello {full_name},\nYour vote for **{choice}** has been successfully recorded.")
+
+    # Results Section
     elif state['ended']:
         st.subheader("Election Results")
-        counts=tally_results()
+        counts = tally_results()
         if counts:
-            total=sum(counts.values())
-            for cand,cnt in counts.items():
-                pct=(cnt/total)*100 if total>0 else 0
+            total = sum(counts.values())
+            for cand, cnt in counts.items():
+                pct = (cnt / total) * 100 if total > 0 else 0
                 st.write(f"**{cand}** — {cnt} votes ({pct:.1f}%)")
                 st.progress(min(int(pct),100))
-        else: st.info("No votes yet.")
+        else:
+            st.info("No votes recorded.")
 
     st.markdown("</div>", unsafe_allow_html=True)
 
