@@ -1,4 +1,2 @@
-streamlit
+streamlit>=1.20.0
 pandas
-ecdsa==0.18.0
-yagmail
