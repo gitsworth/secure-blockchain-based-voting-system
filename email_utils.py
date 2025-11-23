@@ -1,25 +1,28 @@
-import smtplib
-from email.mime.text import MIMEText
+# email_utils.py
 import streamlit as st
+import smtplib
+from email.message import EmailMessage
 
-def send_email(to_email, subject, body):
-    secrets = st.secrets["brevo"]
-    smtp_user = secrets["smtp_user"]
-    smtp_key = secrets["smtp_key"]
-    smtp_server = "smtp-relay.brevo.com"
-    smtp_port = 587
+# Access secrets from Streamlit Cloud
+secrets = st.secrets["brevo"]
+SMTP_USER = secrets["smtp_user"]
+SMTP_KEY = secrets["smtp_key"]
 
-    msg = MIMEText(body)
+def send_email(to_email, subject, content):
+    """
+    Sends an email via Brevo SMTP.
+    """
+    msg = EmailMessage()
+    msg.set_content(content)
     msg['Subject'] = subject
-    msg['From'] = smtp_user
+    msg['From'] = SMTP_USER
     msg['To'] = to_email
 
     try:
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
+        with smtplib.SMTP('smtp-relay.brevo.com', 587) as server:
             server.starttls()
-            server.login(smtp_user, smtp_key)
+            server.login(SMTP_USER, SMTP_KEY)
             server.send_message(msg)
-        return True
+        return True, "Email sent successfully."
     except Exception as e:
-        st.warning(f"Email could not be sent: {e}")
-        return False
+        return False, f"Failed to send email: {e}"
