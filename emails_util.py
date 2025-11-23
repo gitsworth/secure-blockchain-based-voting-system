@@ -1,38 +1,48 @@
+# email_utils.py
+import streamlit as st
 import smtplib
 from email.mime.text import MIMEText
-import os
-import streamlit as st
 
-# SMTP Configuration for Brevo
-SMTP_SERVER = "smtp-relay.sendinblue.com"
-SMTP_PORT = 587
-SMTP_USER = os.environ.get("SMTP_USER")  # From Streamlit Secrets
-SMTP_PASS = os.environ.get("SMTP_PASS")  # From Streamlit Secrets
+# ------------------------
+# Load Brevo SMTP credentials from Streamlit Secrets
+# ------------------------
+try:
+    BREVO_USER = st.secrets["brevo"]["smtp_user"]
+    BREVO_PASS = st.secrets["brevo"]["smtp_key"]
+except KeyError:
+    BREVO_USER = ""
+    BREVO_PASS = ""
+    print("Warning: Brevo SMTP credentials not found in Streamlit secrets.")
 
+BREVO_SMTP = "smtp-relay.brevo.com"
+BREVO_PORT = 587
+
+# ------------------------
+# Email sending function
+# ------------------------
 def send_email(to_email, subject, body):
     """
     Sends an email using Brevo SMTP.
-    Handles exceptions so the app does not crash if email fails.
+    If sending fails (e.g., quota exceeded), exception is caught.
     """
+    if not BREVO_USER or not BREVO_PASS:
+        print("Email not sent: SMTP credentials missing.")
+        return False
+
     try:
-        # Create the email message
         msg = MIMEText(body)
         msg['Subject'] = subject
-        msg['From'] = SMTP_USER
+        msg['From'] = BREVO_USER
         msg['To'] = to_email
 
-        # Connect to Brevo SMTP server
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server = smtplib.SMTP(BREVO_SMTP, BREVO_PORT)
         server.starttls()
-        server.login(SMTP_USER, SMTP_PASS)
-        server.send_message(msg)
+        server.login(BREVO_USER, BREVO_PASS)
+        server.sendmail(BREVO_USER, [to_email], msg.as_string())
         server.quit()
-
-        # Optional: Streamlit feedback
-        st.success(f"Email sent to {to_email} successfully!")
+        print(f"Email sent to {to_email}")
+        return True
 
     except Exception as e:
-        # Log the error to console
-        print(f"Email could not be sent to {to_email}: {e}")
-        # Show warning in Streamlit UI
-        st.warning(f"Email could not be sent to {to_email}. It may have reached the daily free limit.")
+        print(f"Email failed to {to_email}: {e}")
+        return False
