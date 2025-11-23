@@ -224,7 +224,12 @@ else:
         else:
             with st.form("register_form"):
                 name = st.text_input("Full name")
-                dob = st.date_input("Date of birth")
+                dob = st.date_input(
+    "Date of birth",
+    min_value=date(1900, 1, 1),
+    max_value=date.today()
+)
+
                 email = st.text_input("Email")
                 password = st.text_input("Password", type="password")
                 submitted = st.form_submit_button("Register and send verification email")
