@@ -1,7 +1,11 @@
 import hashlib
 from ecdsa import SigningKey, VerifyingKey, SECP256k1
 from ecdsa.util import sigencode_der, sigdecode_der
+# This specific import is needed for the verify function
+from ecdsa.keys import BadSignatureError 
 
+# --- KEY GENERATION ---
+# ... (rest of the file remains the same)
 # --- KEY GENERATION ---
 
 def generate_key_pair():
