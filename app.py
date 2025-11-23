@@ -12,8 +12,8 @@ from email_utils import send_email # Now uses yagmail/SMTP
 # --- HOST KEYS ---
 # ⚠️ CRITICAL STEP 1: Paste the unique keys you generated here!
 # These keys are required for the Host Authority to sign all blocks (Proof-of-Authority)
-HOST_PUBLIC_KEY = "PASTE_YOUR_PUBLIC_KEY_HERE"  # PASTE THE SECOND STRING HERE
-HOST_PRIVATE_KEY = "PASTE_YOUR_PRIVATE_KEY_HERE" # PASTE THE FIRST STRING HERE
+HOST_PUBLIC_KEY = "96ec4599db2b8c92b303ddff859ec63f95e0a3384f23fb576b8a14edcd9c1b34254d8ee93c9e5d7b9f955dde072da2814a47b30198ff08611f9f9578d20d01c1"  # PASTE THE SECOND STRING HERE
+HOST_PRIVATE_KEY = "938f199f958ca29ca278d1542ce04daab1c4abf93842903ff9c543cd22b948a7" # PASTE THE FIRST STRING HERE
 
 # --- CONFIGURATION (CRITICAL for Email) ---
 DB_PATH = 'voters.db'
