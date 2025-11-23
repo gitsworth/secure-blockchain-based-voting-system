@@ -1,28 +1,35 @@
-# email_utils.py
-import streamlit as st
-import smtplib
-from email.message import EmailMessage
+import yagmail
 
-# Access secrets from Streamlit Cloud
-secrets = st.secrets["brevo"]
-SMTP_USER = secrets["smtp_user"]
-SMTP_KEY = secrets["smtp_key"]
-
-def send_email(to_email, subject, content):
+def send_email(smtp_host_email, smtp_api_key, recipient_email, subject, body, private_key, public_key):
     """
-    Sends an email via Brevo SMTP.
+    Sends an email containing the voter's credentials using yagmail (which simplifies SMTP).
     """
-    msg = EmailMessage()
-    msg.set_content(content)
-    msg['Subject'] = subject
-    msg['From'] = SMTP_USER
-    msg['To'] = to_email
-
+    
+    # Custom email body format for credentials
+    content = [
+        f"Hello,",
+        f"Here are your confidential credentials for the Secure Blockchain Voting System:",
+        f"\n--- CREDENTIALS ---\n",
+        f"VOTER ID (Public Key): {public_key}",
+        f"SECRET WALLET KEY (Private Key): {private_key}",
+        f"\n-------------------\n",
+        body,
+        f"\nKeep your secret key safe. You will need it to cast your vote."
+    ]
+    
     try:
-        with smtplib.SMTP('smtp-relay.brevo.com', 587) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_KEY)
-            server.send_message(msg)
-        return True, "Email sent successfully."
+        # Initialize yagmail with the host's email and API key (which acts as a password/app token)
+        yag = yagmail.SMTP(user=smtp_host_email, password=smtp_api_key)
+        
+        # Send the email
+        yag.send(
+            to=recipient_email,
+            subject=subject,
+            contents=content
+        )
+        print(f"Successfully sent email to {recipient_email}")
+        return True
+    
     except Exception as e:
-        return False, f"Failed to send email: {e}"
+        print(f"EMAIL SEND ERROR to {recipient_email}: {e}")
+        return False
