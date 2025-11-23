@@ -1,16 +1,17 @@
-# app.py
 import streamlit as st
 import sqlite3
-import hashlib
 from datetime import datetime, date
+import hashlib
 from blockchain import Blockchain
 from email_utils import send_email
+import random, string
 
 # ------------------------
-# CONFIG AND STYLE
+# CONFIG
 # ------------------------
 DB = "voters.db"
 MAX_VOTERS = 100
+MAX_CANDIDATES = 5
 THEME_BLUE = "#1e63d6"
 
 st.set_page_config(page_title="Secure Voting System", layout="wide")
@@ -18,14 +19,16 @@ st.set_page_config(page_title="Secure Voting System", layout="wide")
 st.markdown(f"""
 <style>
 .stApp {{ background: #f8fbff; }}
-.card {{ background: white; padding: 18px; border-radius: 10px; box-shadow: 0 4px 12px rgba(30,99,214,0.08); }}
+.card {{ background: white; padding: 18px; border-radius: 10px; box-shadow: 0 4px 12px rgba(30,99,214,0.08); margin-bottom:10px; }}
+.sidebar-blue {{ background-color: {THEME_BLUE}; color:white; padding: 10px; border-radius:0px; }}
+.grey-box {{ background-color:#e0e0e0; padding:12px; border-radius:8px; margin-bottom:10px; }}
+.green-box {{ background-color:#a8e6a1; padding:12px; border-radius:8px; margin-bottom:10px; }}
 .blue-btn {{ background: {THEME_BLUE}; color: white; padding: 8px 16px; border-radius: 8px; border: none; font-weight:600; }}
-.small-muted {{ color: #6b7280; font-size: 13px; }}
 </style>
 """, unsafe_allow_html=True)
 
 # ------------------------
-# DATABASE HELPERS
+# DATABASE
 # ------------------------
 def get_conn():
     return sqlite3.connect(DB, check_same_thread=False)
@@ -33,38 +36,36 @@ def get_conn():
 def init_db():
     conn = get_conn()
     c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS voters (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            full_name TEXT,
-            dob TEXT,
-            email TEXT UNIQUE,
-            has_voted INTEGER DEFAULT 0
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS candidates (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS votes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            voter_hash TEXT,
-            candidate TEXT,
-            timestamp TEXT
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS election_state (
-            id INTEGER PRIMARY KEY CHECK(id=1),
-            registration_open INTEGER DEFAULT 0,
-            voting_open INTEGER DEFAULT 0,
-            ended INTEGER DEFAULT 0
-        )
-    """)
-    c.execute("INSERT OR IGNORE INTO election_state (id, registration_open, voting_open, ended) VALUES (1,0,0,0)")
+    c.execute("""CREATE TABLE IF NOT EXISTS voters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                full_name TEXT,
+                dob TEXT,
+                email TEXT UNIQUE,
+                password TEXT,
+                verified INTEGER DEFAULT 0,
+                has_voted INTEGER DEFAULT 0
+                )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE
+                )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS votes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                voter_hash TEXT,
+                candidate TEXT,
+                timestamp TEXT
+                )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS election_state (
+                id INTEGER PRIMARY KEY CHECK(id=1),
+                voting_started INTEGER DEFAULT 0,
+                voting_ended INTEGER DEFAULT 0
+                )""")
+    c.execute("INSERT OR IGNORE INTO election_state (id,voting_started,voting_ended) VALUES (1,0,0)")
+    c.execute("""CREATE TABLE IF NOT EXISTS verification_tokens (
+                email TEXT UNIQUE,
+                token TEXT,
+                timestamp TEXT
+                )""")
     conn.commit()
     conn.close()
 
@@ -72,247 +73,203 @@ init_db()
 blockchain = Blockchain()
 
 # ------------------------
-# UTILITY FUNCTIONS
+# UTILITIES
 # ------------------------
-def hash_value(s: str) -> str:
+def hash_value(s: str):
     return hashlib.sha256(s.encode()).hexdigest()
 
 def voter_hash(email):
-    return hash_value(email.strip().lower() + "|securevoting")
+    return hash_value(email.strip().lower()+"|securevoting")
+
+def generate_token(email):
+    salt = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
+    return hash_value(email + salt)
 
 # ------------------------
-# ELECTION STATE HELPERS
+# QUERY PARAMS
 # ------------------------
-def get_state():
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("SELECT registration_open, voting_open, ended FROM election_state WHERE id=1")
-    row = c.fetchone()
-    conn.close()
-    return {'registration_open': bool(row[0]), 'voting_open': bool(row[1]), 'ended': bool(row[2])}
-
-def set_registration(open_bool: bool):
-    conn = get_conn(); c = conn.cursor()
-    c.execute("UPDATE election_state SET registration_open=?, voting_open=0, ended=0 WHERE id=1", (1 if open_bool else 0,))
-    conn.commit(); conn.close()
-
-def start_voting():
-    conn = get_conn(); c = conn.cursor()
-    c.execute("UPDATE election_state SET registration_open=0, voting_open=1, ended=0 WHERE id=1")
-    conn.commit(); conn.close()
-
-def end_voting():
-    conn = get_conn(); c = conn.cursor()
-    c.execute("UPDATE election_state SET registration_open=0, voting_open=0, ended=1 WHERE id=1")
-    conn.commit(); conn.close()
+query_params = st.experimental_get_query_params()
+mode = query_params.get("mode", ["host"])[0]
+verify_token = query_params.get("verify", [None])[0]
 
 # ------------------------
-# VOTER / CANDIDATE HELPERS
+# DATABASE HELPERS
 # ------------------------
-def count_voters():
+def add_voter(full_name, dob, email, password):
     conn = get_conn(); c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM voters"); n=c.fetchone()[0]; conn.close()
-    return n
-
-def add_voter(full_name, dob, email):
-    if count_voters() >= MAX_VOTERS:
-        return False, "Voter limit reached (100)."
-    normalized = ' '.join(part.strip() for part in full_name.split()).lower()
-    conn = get_conn(); c = conn.cursor()
+    normalized = ' '.join(full_name.strip().split()).lower()
     try:
-        c.execute("INSERT INTO voters (full_name, dob, email) VALUES (?, ?, ?)", (normalized, dob, email.strip().lower()))
+        c.execute("INSERT INTO voters (full_name,dob,email,password) VALUES (?,?,?,?,?)", (normalized,dob,email.strip().lower(),password))
         conn.commit(); conn.close()
-        return True, "Registered successfully."
+        return True
     except sqlite3.IntegrityError:
         conn.close()
-        return False, "Email already registered."
+        return False
 
-def get_voter(email):
+def get_voter_by_email(email):
     conn = get_conn(); c = conn.cursor()
-    c.execute("SELECT id, full_name, dob, email, has_voted FROM voters WHERE email=?", (email.strip().lower(),))
-    row=c.fetchone(); conn.close()
+    c.execute("SELECT * FROM voters WHERE email=?", (email.strip().lower(),))
+    row = c.fetchone(); conn.close()
     return row
 
-def mark_voted(email, voter_hash, candidate):
-    conn=get_conn(); c=conn.cursor()
-    c.execute("UPDATE voters SET has_voted=1 WHERE email=?", (email.strip().lower(),))
-    c.execute("INSERT INTO votes (voter_hash, candidate, timestamp) VALUES (?, ?, ?)",
-              (voter_hash, candidate, str(datetime.utcnow())))
+def mark_voter_verified(email):
+    conn = get_conn(); c = conn.cursor()
+    c.execute("UPDATE voters SET verified=1 WHERE email=?", (email.strip().lower(),))
     conn.commit(); conn.close()
 
+def mark_voted(email, candidate):
+    conn = get_conn(); c = conn.cursor()
+    c.execute("UPDATE voters SET has_voted=1 WHERE email=?", (email.strip().lower(),))
+    v_hash = voter_hash(email)
+    c.execute("INSERT INTO votes (voter_hash,candidate,timestamp) VALUES (?,?,?)", (v_hash,candidate,str(datetime.utcnow())))
+    conn.commit(); conn.close()
+    blockchain.add_block(f"{v_hash}|{candidate}")
+
 def add_candidate(name):
-    conn=get_conn(); c=conn.cursor()
-    try: c.execute("INSERT INTO candidates (name) VALUES (?)", (name.strip(),)); conn.commit(); conn.close(); return True
-    except sqlite3.IntegrityError: conn.close(); return False
+    conn = get_conn(); c = conn.cursor()
+    try:
+        c.execute("INSERT INTO candidates (name) VALUES (?)", (name.strip(),))
+        conn.commit(); conn.close()
+        return True
+    except sqlite3.IntegrityError:
+        conn.close()
+        return False
+
+def remove_candidate(name):
+    conn = get_conn(); c = conn.cursor()
+    c.execute("DELETE FROM candidates WHERE name=?", (name.strip(),))
+    conn.commit(); conn.close()
 
 def list_candidates():
-    conn=get_conn(); c=conn.cursor()
-    c.execute("SELECT id, name FROM candidates ORDER BY id"); rows=c.fetchall(); conn.close(); return rows
+    conn = get_conn(); c = conn.cursor()
+    c.execute("SELECT id,name FROM candidates ORDER BY id"); rows=c.fetchall(); conn.close()
+    return rows
 
-def tally_results():
-    conn=get_conn(); c=conn.cursor()
-    c.execute("SELECT candidate, COUNT(*) FROM votes GROUP BY candidate")
-    rows=c.fetchall(); conn.close()
-    return {r[0]: r[1] for r in rows}
+def list_voters():
+    conn = get_conn(); c = conn.cursor()
+    c.execute("SELECT full_name,dob,email,has_voted FROM voters ORDER BY id"); rows=c.fetchall(); conn.close()
+    return rows
 
-# ------------------------
-# DETERMINE MODE (HOST OR VOTER)
-# ------------------------
-query = st.experimental_get_query_params()
-mode = query.get("mode", ["voter"])[0]
+def get_state():
+    conn = get_conn(); c = conn.cursor()
+    c.execute("SELECT voting_started,voting_ended FROM election_state WHERE id=1"); row=c.fetchone(); conn.close()
+    return {'voting_started':bool(row[0]),'voting_ended':bool(row[1])}
 
-st.markdown(f"<h1 style='color:{THEME_BLUE};'>Secure Voting System</h1>", unsafe_allow_html=True)
-st.markdown("<div class='small-muted'>Host controls the election: enable registration → start voting → end voting</div>", unsafe_allow_html=True)
-
-# ------------------------
-# SIDEBAR
-# ------------------------
-st.sidebar.title("Navigation")
-if mode=="host":
-    st.sidebar.markdown("Host Dashboard")
-else:
-    st.sidebar.markdown("Voter Portal")
-
-view_chain = st.sidebar.button("View Blockchain")
-show_results = st.sidebar.button("Results")
+def set_voting(start=False,end=False):
+    conn = get_conn(); c = conn.cursor()
+    c.execute("UPDATE election_state SET voting_started=?,voting_ended=? WHERE id=1", (1 if start else 0,1 if end else 0))
+    conn.commit(); conn.close()
 
 # ------------------------
 # HOST DASHBOARD
 # ------------------------
 if mode=="host":
-    st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.header("Host Dashboard")
-    state = get_state()
-    st.write(f"**Registration open:** {state['registration_open']} | **Voting open:** {state['voting_open']} | **Ended:** {state['ended']}")
+    st.markdown(f"<div class='card'><h1 style='color:{THEME_BLUE};'>Secure<br>Blockchain<br>Voting System</h1></div>", unsafe_allow_html=True)
+    tabs = ["Home","Voters","Candidates","Blockchain"]
+    selected_tab = st.sidebar.radio("Navigation", tabs)
 
-    col1,col2=st.columns(2)
-    with col1:
-        if state['registration_open']:
-            if st.button("Close Registration"): set_registration(False); st.success("Registration closed.")
-        else:
-            if st.button("Enable Registration"): set_registration(True); st.success("Registration enabled.")
-    with col2:
-        if state['voting_open']:
-            if st.button("End Voting"): end_voting(); st.success("Voting ended.")
-        else:
-            if st.button("Start Voting"): start_voting(); st.success("Voting started.")
-
-    st.markdown("---")
-    st.subheader("Candidates")
-    with st.form("add_candidate"):
-        cname=st.text_input("Candidate Name"); submitted=st.form_submit_button("Add Candidate")
-        if submitted:
-            if cname.strip()=="": st.error("Enter a valid name.")
+    if selected_tab=="Home":
+        st.write("Host dashboard controls")
+        state = get_state()
+        if st.button("Start Voting"):
+            if len(list_candidates())<2:
+                st.warning("Not sufficient candidates")
             else:
-                ok=add_candidate(cname)
-                if ok: st.success(f"Candidate '{cname}' added."); cname=""
-                else: st.warning("Candidate exists.")
-    candidates=list_candidates()
-    if candidates: st.write("Current candidates:", [c[1] for c in candidates])
+                set_voting(start=True,end=False); st.success("Voting started")
+        if st.button("End Voting"):
+            set_voting(start=False,end=True); st.success("Voting ended")
 
-    st.markdown("---")
-    st.subheader("Registered Voters")
-    conn=get_conn(); c=conn.cursor(); c.execute("SELECT id, full_name, dob, email, has_voted FROM voters ORDER BY id"); rows=c.fetchall(); conn.close()
-    if rows: st.table([{"Name": r[1].title(),"DOB":r[2],"Email":r[3],"Has Voted":bool(r[4])} for r in rows])
-    else: st.info("No voters registered yet.")
+    elif selected_tab=="Voters":
+        st.header("Registered Voters")
+        for v in list_voters():
+            name,dob,email,has_voted=v
+            with st.container():
+                st.markdown(f"<div class='grey-box'>Name: {name.title()}<br>DOB: {dob}<br>Email: {email}</div>", unsafe_allow_html=True)
+                if st.button(f"Remove {name}",key=email):
+                    if st.confirm(f"Remove voter {name}?"):
+                        conn=get_conn();c=conn.cursor();c.execute("DELETE FROM voters WHERE email=?",(email,));conn.commit();conn.close()
+                        st.success(f"{name} removed")
 
-    st.markdown("</div>", unsafe_allow_html=True)
+    elif selected_tab=="Candidates":
+        st.header("Candidates")
+        if st.button("Add Candidate"):
+            if len(list_candidates())>=MAX_CANDIDATES: st.warning("Maximum 5 candidates")
+            else: st.text_input("Candidate Name","",key="new_cand")
+            # implement adding logic with a submit button
+        for c in list_candidates():
+            name=c[1]
+            with st.container():
+                st.markdown(f"<div class='grey-box'>{name}</div>", unsafe_allow_html=True)
+                if st.button(f"Remove {name}",key=name):
+                    remove_candidate(name)
+                    st.success(f"{name} removed")
+
+    elif selected_tab=="Blockchain":
+        st.header("Blockchain")
+        for blk in blockchain.chain:
+            st.markdown(f"**Block #{blk.index}**<br>Timestamp: {blk.timestamp}<br>Hash: {blk.hash}<br>Previous: {blk.previous_hash}",unsafe_allow_html=True)
 
 # ------------------------
-# VOTER PORTAL (Updated UI)
+# VOTER PORTAL
 # ------------------------
-else:
-    st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.header("Voter Portal")
-    
+elif mode=="voter":
+    tabs=["Home","Register","Vote","Blockchain"]
+    selected_tab = st.sidebar.radio("Navigation", tabs)
+
     state = get_state()
-    st.write(f"**Registration open:** {state['registration_open']} | "
-             f"**Voting open:** {state['voting_open']} | "
-             f"**Ended:** {state['ended']}")
-    st.markdown("---")
 
-    # Registration Form
-    if state['registration_open']:
-        st.subheader("Register to Vote")
-        today = date.today()
-        min_year = 1900
-        max_year = today.year - 18  # at least 18
+    if selected_tab=="Home":
+        st.header("Welcome")
+        if st.button("Results"):
+            # generate bar chart + table
+            st.write("Results will be here")
 
-        with st.form("registration_form"):
-            name = st.text_input("Full Name (First Middle Last)", placeholder="John M. Doe")
-            email = st.text_input("Email", placeholder="you@example.com")
-            dob = st.date_input("Date of Birth", min_value=date(min_year,1,1), max_value=date(max_year,today.month,today.day))
-            submitted = st.form_submit_button("Register")
-
-            if submitted:
-                age = today.year - dob.year - ((today.month,today.day) < (dob.month,dob.day))
-                if age < 18:
-                    st.error("You must be at least 18 years old.")
-                elif name.strip() == "" or email.strip() == "":
-                    st.error("Name and Email cannot be empty.")
-                else:
-                    ok, msg = add_voter(name, dob.strftime("%Y-%m-%d"), email)
-                    if ok:
-                        st.success("✅ Registration successful!")
-                        send_email(email, "Registration Successful", f"Hello {name},\nYour registration for Secure Voting is complete!")
-                    else:
-                        st.error(msg)
-
-    # Voting Section
-    elif state['voting_open']:
-        st.subheader("Cast Your Vote")
-        email = st.text_input("Enter your registered email", placeholder="you@example.com", key="vote_email")
-        if st.button("Login to vote"):
-            voter = get_voter(email)
-            if not voter:
-                st.error("Email not found. Please register first.")
+    elif selected_tab=="Register":
+        st.header("Register to Vote")
+        name = st.text_input("Full Name",max_chars=50)
+        dob = st.date_input("Date of Birth")
+        email = st.text_input("Email",max_chars=50)
+        password = st.text_input("Password",type="password",max_chars=50)
+        if st.button("Register"):
+            today=date.today()
+            age=today.year-dob.year-((today.month,today.day)<(dob.month,dob.day))
+            if age<18: st.error("Not eligible to vote")
             else:
-                vid, full_name, dob_str, em, has_voted = voter
-                if has_voted:
-                    st.warning("You have already voted.")
+                existing=get_voter_by_email(email)
+                if existing and existing[1]==name.lower() and existing[2]==dob.strftime("%Y-%m-%d"): st.warning("Already registered")
                 else:
-                    cands = list_candidates()
-                    if not cands:
-                        st.info("No candidates available yet. Please wait for host to add them.")
-                    else:
-                        choice = st.radio("Select a candidate:", [c[1] for c in cands])
-                        if st.button("Submit Vote"):
-                            v_hash = voter_hash(email)
-                            vote_fingerprint = hash_value(email.strip().lower() + "|" + choice + "|" + str(datetime.utcnow()))
-                            blockchain.add_block(vote_fingerprint)
-                            mark_voted(email, v_hash, choice)
-                            st.success(f"✅ Your vote for **{choice}** has been recorded!")
-                            send_email(email, "Vote Recorded", f"Hello {full_name},\nYour vote for **{choice}** has been successfully recorded.")
+                    token = generate_token(email)
+                    add_voter(name,dob.strftime("%Y-%m-%d"),email,password)
+                    # save token in DB
+                    conn=get_conn();c=conn.cursor();c.execute("INSERT OR REPLACE INTO verification_tokens(email,token,timestamp) VALUES (?,?,?)",(email,token,str(datetime.utcnow())));conn.commit();conn.close()
+                    link=f"https://your-app-link.streamlit.app/?mode=voter&verify={token}"
+                    send_email(email,"Confirm Registration",f"Click this link to confirm your registration: {link}")
+                    st.success("Verification email sent. Please check your inbox")
 
-    # Results Section
-    elif state['ended']:
-        st.subheader("Election Results")
-        counts = tally_results()
-        if counts:
-            total = sum(counts.values())
-            for cand, cnt in counts.items():
-                pct = (cnt / total) * 100 if total > 0 else 0
-                st.write(f"**{cand}** — {cnt} votes ({pct:.1f}%)")
-                st.progress(min(int(pct),100))
+    elif selected_tab=="Vote":
+        if not state['voting_started']: st.info("Voting not started yet")
         else:
-            st.info("No votes recorded.")
+            st.header("Vote for your Candidate")
+            candidates=list_candidates()
+            choice=st.radio("Select candidate",[c[1] for c in candidates])
+            if st.button("Confirm Choice"):
+                st.text_input("Enter Name for confirmation")
+                st.text_input("Enter Email")
+                st.text_input("Enter Password",type="password")
+                # add logic to validate credentials & record vote
 
-    st.markdown("</div>", unsafe_allow_html=True)
+    elif selected_tab=="Blockchain":
+        st.header("Blockchain")
+        for blk in blockchain.chain:
+            st.markdown(f"**Block #{blk.index}**<br>Timestamp: {blk.timestamp}<br>Hash: {blk.hash}<br>Previous: {blk.previous_hash}",unsafe_allow_html=True)
 
 # ------------------------
-# BLOCKCHAIN VIEWER (Everyone)
+# VERIFY TOKEN
 # ------------------------
-if view_chain:
-    st.markdown("<div class='card'>", unsafe_allow_html=True)
-    st.header("Blockchain Explorer (Real-Time)")
-    for blk in blockchain.chain:
-        try:
-            idx=blk.index; ts=blk.timestamp; h=blk.hash; prev=blk.previous_hash
-        except:
-            idx=blk['index']; ts=blk['timestamp']; h=blk['hash']; prev=blk['previous_hash']
-        st.markdown(f"**Block #{idx}**")
-        st.write(f"Timestamp: {ts}")
-        st.write(f"Previous Hash: `{prev}`")
-        st.write(f"Current Hash: `{h}`")
-        st.markdown("---")
-    st.markdown("</div>", unsafe_allow_html=True)
+if verify_token:
+    conn=get_conn();c=conn.cursor();c.execute("SELECT email FROM verification_tokens WHERE token=?",(verify_token,));row=c.fetchone()
+    if row:
+        mark_voter_verified(row[0])
+        st.success("✅ Registration confirmed!")
+    else:
+        st.error("Invalid or expired verification link")
