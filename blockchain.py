@@ -2,9 +2,12 @@ import hashlib
 import json
 import time
 from datetime import datetime
-from ecdsa import VerifyingKey, BadSignatureError, SECP256k1
+# Ensure these imports are ready at the start
+from ecdsa import VerifyingKey, BadSignatureError, SECP256k1 
 from ecdsa.util import sigencode_der, sigdecode_der
 
+# --- BLOCK CLASS ---
+# ... (rest of the file remains the same)
 # --- BLOCK CLASS ---
 class Block:
     """Represents a single block in the blockchain."""
