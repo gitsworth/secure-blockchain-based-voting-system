@@ -152,16 +152,20 @@ with tab_host:
                     st.session_state.voters_df = pd.concat([voters_df, new_voter], ignore_index=True)
                     save_voters(st.session_state.voters_df, DB_PATH)
                     
+                    # Display the keys here, as requested
                     st.success(f"Registered {new_name}!")
                     st.subheader("MANUAL CREDENTIAL COPY")
                     st.code(f"Public Key (ID): {public_key}")
                     st.code(f"Private Key (Secret): {private_key}")
-                    st.rerun()
+                    
+                    st.rerun() # Rerun to refresh the voter table below
     else:
         st.info("Registration closed.")
 
-    st.subheader("Current Registered Voters")
-    st.dataframe(st.session_state.voters_df[['id', 'name', 'public_key', 'has_voted']], use_container_width=True)
+    st.subheader("Current Registered Voters (Includes Private Key for Testing)")
+    # --- MODIFIED LINE: Added 'private_key' to the columns to display ---
+    st.dataframe(st.session_state.voters_df[['id', 'name', 'public_key', 'private_key', 'has_voted']], use_container_width=True)
+    # -------------------------------------------------------------------
 
     st.markdown("---")
     colA, colB, colC = st.columns(3)
