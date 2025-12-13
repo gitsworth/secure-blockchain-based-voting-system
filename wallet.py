@@ -1,11 +1,8 @@
 import hashlib
 from ecdsa import SigningKey, VerifyingKey, SECP256k1
 from ecdsa.util import sigencode_der, sigdecode_der
-# This specific import is needed for the verify function
-from ecdsa.keys import BadSignatureError 
+import binascii
 
-# --- KEY GENERATION ---
-# ... (rest of the file remains the same)
 # --- KEY GENERATION ---
 
 def generate_key_pair():
@@ -54,8 +51,6 @@ def verify_signature(public_key, data_to_verify, signature):
             sigdecode=sigdecode_der
         )
         
-    except BadSignatureError:
-        return False
     except Exception as e:
         print(f"Error during signature verification: {e}")
         return False
